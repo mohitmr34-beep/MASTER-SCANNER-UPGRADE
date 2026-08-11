@@ -28,12 +28,10 @@ source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=Tr
 # CSV MODE
 # ===============================
 if source == "Manual CSV":
-
     uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
-
         if "Symbol" in df_symbols.columns:
             symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
         else:
@@ -43,22 +41,19 @@ if source == "Manual CSV":
         symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS"]
 
 # ===============================
-# CHARTINK LIVE MODE
+# CHARTINK MODE
 # ===============================
 else:
-
     st.subheader("Chartink LIVE Scanner")
     chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
 
     @st.cache_data(ttl=60)
     def get_chartink_symbols(cookie):
-
         if not cookie:
             raise Exception("Cookie required")
 
         session = requests.Session()
 
-        # Load cookie
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
@@ -66,9 +61,6 @@ else:
 
         session.get("https://chartink.com")
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
-
-        if not xsrf:
-            raise Exception("Invalid Cookie")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
@@ -78,7 +70,6 @@ else:
             "Referer": "https://chartink.com/"
         }
 
-        # YOUR REAL SCANNER CLAUSE
         payload = {
             "scan_clause": "( {cash} ( ( {cash} ( ( {cash} ( daily close >= daily max(252, daily high)*0.98 and daily volume > daily sma(daily volume,20)*1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max(252, daily high) and daily close < daily open and daily volume > daily sma(daily volume,20)*1.5 ) ) or ( {cash} ( daily open > 1 day ago close*1.02 and daily volume > daily sma(daily volume,20)*2 and daily close > daily open ) ) ) ) ) )"
         }
@@ -89,13 +80,7 @@ else:
             raise Exception("Chartink fetch failed")
 
         data = res.json().get("data", [])
-
-        symbols = [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
-
-        if not symbols:
-            raise Exception("No stocks returned")
-
-        return symbols
+        return [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
 
     if st.button("Get LIVE Stocks"):
         try:
@@ -117,15 +102,15 @@ else:
 # -------------------------------
 # TIMEFRAME
 # -------------------------------
-timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
+timeframe = st.selectbox("Timeframe", ["5m","15m","1d"])
 
 # -------------------------------
-# DATA FETCH (SAFE)
+# DATA FETCH
 # -------------------------------
 @st.cache_data
 def get_data(symbol, timeframe):
     try:
-        df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+        df = yf.download(symbol, period="3mo", interval=timeframe, progress=False)
 
         if df is None or df.empty:
             return None
@@ -133,23 +118,29 @@ def get_data(symbol, timeframe):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        df = df.dropna()
-
-        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
-            return None
-
-        return df
+        return df.dropna()
 
     except:
         return None
 
 # -------------------------------
-# AI LOGIC
+# ATR FUNCTION
+# -------------------------------
+def calculate_atr(df, period=14):
+    df = df.copy()
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
+    tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
+
+# -------------------------------
+# ANALYSIS LOGIC
 # -------------------------------
 def analyze_stock(df):
 
     if df is None or len(df) < 50:
-        return "WAIT", None, None, None
+        return "WAIT", None, None, None, None
 
     try:
         latest = df.iloc[-1]
@@ -160,57 +151,27 @@ def analyze_stock(df):
         high = float(latest["High"])
         low = float(latest["Low"])
         prev_close = float(prev["Close"])
+
+        atr = calculate_atr(df)
+
     except:
-        return "WAIT", None, None, None
+        return "WAIT", None, None, None, None
 
     high_52 = float(df["High"].rolling(252).max().iloc[-1])
 
     if close >= 0.98 * high_52 and close > open_:
-        return "BUY", high, low, high + (high - low) * 2
+        return "BUY", high, high - atr, high + 2*atr, atr
 
     elif high >= high_52 and close < open_:
-        return "SELL", low, high, low - (high - low) * 2
+        return "SELL", low, low + atr, low - 2*atr, atr
 
     elif open_ > prev_close * 1.02:
         if close > open_:
-            return "BUY", high, low, high + (high - low) * 2
+            return "BUY", high, high - atr, high + 2*atr, atr
         else:
-            return "SELL", low, high, low - (high - low) * 2
+            return "SELL", low, low + atr, low - 2*atr, atr
 
-    return "WAIT", None, None, None
-
-# -------------------------------
-# RISK SETTINGS
-# -------------------------------
-st.sidebar.header("💼 Risk Settings")
-
-capital = st.sidebar.number_input("Capital (₹)", value=50000)
-risk_percent = st.sidebar.slider("Risk % per trade", 0.5, 2.0, 1.0)
-
-risk_amount = capital * (risk_percent / 100)
-
-# -------------------------------
-# PURE RISK CALCULATOR
-# -------------------------------
-def calculate_qty(entry, sl, risk_amount):
-
-    if entry is None or sl is None:
-        return 0, 0, 0, "NO DATA"
-
-    sl_distance = abs(entry - sl)
-
-    if sl_distance == 0:
-        return 0, 0, 0, "INVALID SL"
-
-    qty = int(risk_amount / sl_distance)
-
-    position_value = qty * entry
-    risk_used = qty * sl_distance
-
-    if qty <= 0:
-        return 0, 0, 0, "LOW RISK"
-
-    return qty, position_value, risk_used, "OK"
+    return "WAIT", None, None, None, None
 
 # -------------------------------
 # RUN SCANNER
@@ -220,48 +181,74 @@ if st.button("Run AI Scanner"):
     results = []
 
     for sym in symbols:
-
         df = get_data(sym, timeframe)
-        signal, entry, sl, target = analyze_stock(df)
 
-        qty, value, risk_used, status = calculate_qty(entry, sl, risk_amount)
+        if df is None:
+            continue
 
-        results.append({
-            "Stock": sym,
-            "Signal": signal,
-            "Entry": round(entry, 2) if entry else None,
-            "SL": round(sl, 2) if sl else None,
-            "Target": round(target, 2) if target else None,
-            "Qty": qty,
-            "Capital Used": round(value, 0),
-            "Risk Used": round(risk_used, 0),
-            "Status": status
-        })
+        signal, entry, sl, target, atr = analyze_stock(df)
+
+        volume = df["Volume"].iloc[-1] if "Volume" in df.columns else 0
+        close_price = df["Close"].iloc[-1]
+
+        # Liquidity Filter
+        if volume < 200000 or close_price < 100:
+            continue
+
+        if signal in ["BUY","SELL"] and entry and sl and target:
+            rr = abs(target-entry)/abs(entry-sl)
+
+            results.append({
+                "Stock": sym,
+                "Signal": signal,
+                "Entry": round(entry,2),
+                "SL": round(sl,2),
+                "Target": round(target,2),
+                "ATR": round(atr,2),
+                "Volume": int(volume),
+                "RR": round(rr,2)
+            })
+
+    if len(results) == 0:
+        st.warning("No valid trades")
+        st.stop()
 
     df_results = pd.DataFrame(results)
 
-    st.subheader("📊 All Results (No Filter)")
+    # Ranking
+    df_results["Score"] = (
+        df_results["RR"]*0.6 +
+        (df_results["Volume"]/df_results["Volume"].max())*0.4
+    )
+
+    df_results = df_results.sort_values(by="Score", ascending=False)
+
+    st.subheader("📊 Filtered Results")
     st.dataframe(df_results, use_container_width=True)
 
-    st.subheader("🔥 Top 2 Signals")
+    # SMART 2 TRADE SELECTION
+    buy_df = df_results[df_results["Signal"]=="BUY"]
+    sell_df = df_results[df_results["Signal"]=="SELL"]
 
-    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
+    if len(buy_df)>0 and len(sell_df)>0:
+        best = pd.concat([buy_df.head(1), sell_df.head(1)])
+    else:
+        best = df_results.head(2)
+
+    st.subheader("🔥 Top 2 Trades")
 
     for _, row in best.iterrows():
-        color = "green" if row["Signal"] == "BUY" else "red"
+        color = "green" if row["Signal"]=="BUY" else "red"
 
         st.markdown(f"""
         <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
         <b>{row['Stock']}</b> - {row['Signal']}<br>
         Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}<br>
-        Qty: {row['Qty']} | Capital: ₹{row['Capital Used']} | Risk: ₹{row['Risk Used']}
+        ATR: {row['ATR']} | RR: {row['RR']}
         </div>
         """, unsafe_allow_html=True)
-
-    if best.empty:
-        st.warning("No signals found")
 
 # -------------------------------
 # FOOTER
 # -------------------------------
-st.caption("Educational use only. Pure risk-based sizing (no capital restriction).")
+st.caption("Educational use only. ATR-based system with smart filtering.")
