@@ -37,7 +37,7 @@ if source == "Manual CSV":
         if "Symbol" in df_symbols.columns:
             symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
         else:
-            st.error("CSV must contain 'Symbol' column")
+            st.error("CSV must contain 'Symbol'")
             st.stop()
     else:
         symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS"]
@@ -50,7 +50,7 @@ else:
     st.subheader("Chartink LIVE Scanner")
     chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
 
-    @st.cache_data(ttl=30)
+    @st.cache_data(ttl=60)
     def get_chartink_symbols(cookie):
 
         if not cookie:
@@ -58,13 +58,13 @@ else:
 
         session = requests.Session()
 
+        # Load cookie
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 session.cookies.set(k, v, domain="chartink.com")
 
         session.get("https://chartink.com")
-
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         if not xsrf:
@@ -78,23 +78,38 @@ else:
             "Referer": "https://chartink.com/"
         }
 
+        # YOUR REAL SCANNER CLAUSE
         payload = {
-            "scan_clause": "( {cash} ( daily close > daily open ) )"
+            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} ( daily close >= daily max(252, daily high)*0.98 and daily volume > daily sma(daily volume,20)*1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max(252, daily high) and daily close < daily open and daily volume > daily sma(daily volume,20)*1.5 ) ) or ( {cash} ( daily open > 1 day ago close*1.02 and daily volume > daily sma(daily volume,20)*2 and daily close > daily open ) ) ) ) ) )"
         }
 
         res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
 
+        if res.status_code != 200:
+            raise Exception("Chartink fetch failed")
+
         data = res.json().get("data", [])
 
-        return [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
+        symbols = [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
+
+        if not symbols:
+            raise Exception("No stocks returned")
+
+        return symbols
 
     if st.button("Get LIVE Stocks"):
-        symbols = get_chartink_symbols(chartink_cookie)
-        st.session_state["symbols"] = symbols
+        try:
+            symbols = get_chartink_symbols(chartink_cookie)
+            st.session_state["symbols"] = symbols
+            st.success(f"{len(symbols)} stocks loaded")
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
 
     elif "symbols" in st.session_state:
         symbols = st.session_state["symbols"]
     else:
+        st.info("Enter cookie and click button")
         st.stop()
 
     st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
@@ -105,12 +120,15 @@ else:
 timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
 
 # -------------------------------
-# DATA FETCH
+# DATA FETCH (SAFE)
 # -------------------------------
 @st.cache_data
 def get_data(symbol, timeframe):
     try:
         df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+
+        if df is None or df.empty:
+            return None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -126,17 +144,17 @@ def get_data(symbol, timeframe):
         return None
 
 # -------------------------------
-# AI LOGIC (UNCHANGED)
+# AI LOGIC
 # -------------------------------
 def analyze_stock(df):
 
     if df is None or len(df) < 50:
         return "WAIT", None, None, None
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
     try:
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
         close = float(latest["Close"])
         open_ = float(latest["Open"])
         high = float(latest["High"])
@@ -172,7 +190,7 @@ risk_percent = st.sidebar.slider("Risk % per trade", 0.5, 2.0, 1.0)
 risk_amount = capital * (risk_percent / 100)
 
 # -------------------------------
-# PURE RISK CALCULATOR (NO CAPITAL LIMIT)
+# PURE RISK CALCULATOR
 # -------------------------------
 def calculate_qty(entry, sl, risk_amount):
 
@@ -185,6 +203,7 @@ def calculate_qty(entry, sl, risk_amount):
         return 0, 0, 0, "INVALID SL"
 
     qty = int(risk_amount / sl_distance)
+
     position_value = qty * entry
     risk_used = qty * sl_distance
 
@@ -201,6 +220,7 @@ if st.button("Run AI Scanner"):
     results = []
 
     for sym in symbols:
+
         df = get_data(sym, timeframe)
         signal, entry, sl, target = analyze_stock(df)
 
@@ -220,15 +240,9 @@ if st.button("Run AI Scanner"):
 
     df_results = pd.DataFrame(results)
 
-    # -------------------------------
-    # SHOW ALL RESULTS (NO FILTER)
-    # -------------------------------
-    st.subheader("📊 All Results (No Capital Filter)")
+    st.subheader("📊 All Results (No Filter)")
     st.dataframe(df_results, use_container_width=True)
 
-    # -------------------------------
-    # TOP 2 SIGNALS
-    # -------------------------------
     st.subheader("🔥 Top 2 Signals")
 
     best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
@@ -250,4 +264,4 @@ if st.button("Run AI Scanner"):
 # -------------------------------
 # FOOTER
 # -------------------------------
-st.caption("Educational use only. Pure risk-based quantity (no capital restriction).")
+st.caption("Educational use only. Pure risk-based sizing (no capital restriction).")
