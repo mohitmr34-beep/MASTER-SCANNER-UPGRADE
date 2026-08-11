@@ -6,78 +6,65 @@ from urllib.parse import unquote
 import time
 
 # -------------------------------
-# CONFIG
+# APP CONFIG
 # -------------------------------
 st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
-st.title("SMT PRO AI Trading Terminal")
+
+st.markdown("<h2 style='text-align:center;'>SMT PRO AI Trading Terminal</h2><hr>", unsafe_allow_html=True)
 
 # -------------------------------
 # AUTO REFRESH
 # -------------------------------
-if st.checkbox("Auto Refresh (5 min)"):
+auto_refresh = st.checkbox("Auto Refresh (5 min)", value=False)
+
+if auto_refresh:
     time.sleep(300)
     st.rerun()
 
 # -------------------------------
-# SOURCE
+# STOCK SOURCE
 # -------------------------------
-source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"])
+source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=True)
 
-df_symbols = pd.DataFrame()
-
-# -------------------------------
-# CSV MODE (FINAL FIX)
-# -------------------------------
+# ===============================
+# CSV MODE
+# ===============================
 if source == "Manual CSV":
 
-    file = st.file_uploader("Upload CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
 
-    if file:
-        df_symbols = pd.read_csv(file)
+    if uploaded_file:
+        df_symbols = pd.read_csv(uploaded_file)
 
-        # CLEAN COLUMN NAMES
-        df_symbols.columns = df_symbols.columns.str.lower().str.strip()
+        # FIX column names
+        df_symbols.columns = df_symbols.columns.str.strip()
 
-        # 🔍 AUTO-DETECT SYMBOL COLUMN
-        symbol_col = None
-        for col in df_symbols.columns:
-            if "sym" in col:   # handles symbol / symbols / nsecode
-                symbol_col = col
-                break
-
-        if symbol_col is None:
-            st.error(f"❌ No symbol column found. Columns: {list(df_symbols.columns)}")
+        if "Symbol" in df_symbols.columns:
+            symbols = [str(s).strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
+        else:
+            st.error("CSV must contain 'Symbol' column")
             st.stop()
-
-        # FIX SYMBOL LIST
+    else:
         symbols = [
-            str(s).strip().upper() + ".NS"
-            for s in df_symbols[symbol_col].dropna()
+            "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS",
+            "SBIN.NS","LT.NS","AXISBANK.NS","KOTAKBANK.NS","ITC.NS"
         ]
 
-        # FIX volume
-        if "volume" in df_symbols.columns:
-            df_symbols["volume"] = (
-                df_symbols["volume"]
-                .astype(str)
-                .str.replace(",", "")
-            )
-            df_symbols["volume"] = pd.to_numeric(df_symbols["volume"], errors="coerce")
-
-        # FIX close
-        if "close" in df_symbols.columns:
-            df_symbols["close"] = pd.to_numeric(df_symbols["close"], errors="coerce")
-
-    else:
-        symbols = ["RELIANCE.NS","HDFCBANK.NS"]
-
-# -------------------------------
-# CHARTINK MODE
-# -------------------------------
+# ===============================
+# CHARTINK LIVE MODE
+# ===============================
 else:
-    cookie = st.text_input("Chartink Cookie", type="password")
 
-    def get_symbols(cookie):
+    st.subheader("Chartink LIVE Scanner")
+
+    chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
+
+    @st.cache_data(ttl=30)
+    def get_chartink_symbols(cookie):
+
+        if not cookie:
+            raise Exception("Cookie required")
+
         session = requests.Session()
 
         for part in cookie.split(";"):
@@ -86,129 +73,206 @@ else:
                 session.cookies.set(k, v, domain="chartink.com")
 
         session.get("https://chartink.com")
+
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
+        if not xsrf:
+            raise Exception("Invalid Cookie / XSRF missing")
+
         headers = {
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
             "X-XSRF-TOKEN": xsrf,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Referer": "https://chartink.com/"
         }
 
-        payload = {"scan_clause": "your logic"}
+        payload = {
+            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} ( daily close >= daily max(252, daily high)*0.98 and daily volume > daily sma(daily volume,20)*1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max(252, daily high) and daily close < daily open and daily volume > daily sma(daily volume,20)*1.5 ) ) or ( {cash} ( daily open > 1 day ago close*1.02 and daily volume > daily sma(daily volume,20)*2 and daily close > daily open ) ) ) ) ) )"
+        }
 
-        r = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
-        data = r.json().get("data", [])
+        res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
 
-        return [d["nsecode"] + ".NS" for d in data]
+        if res.status_code != 200:
+            raise Exception("Chartink fetch failed")
 
-    if st.button("Get Stocks"):
+        data = res.json().get("data", [])
+
+        symbols = []
+        for row in data:
+            sym = row.get("nsecode")
+            if sym:
+                symbols.append(sym.upper() + ".NS")
+
+        if not symbols:
+            raise Exception("No stocks returned")
+
+        return symbols
+
+    if st.button("Get LIVE Stocks"):
         try:
-            symbols = get_symbols(cookie)
+            symbols = get_chartink_symbols(chartink_cookie)
             st.session_state["symbols"] = symbols
-        except:
-            st.error("Chartink error")
+            st.success(f"{len(symbols)} stocks loaded")
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
 
-    symbols = st.session_state.get("symbols", [])
+    elif "symbols" in st.session_state:
+        symbols = st.session_state["symbols"]
+    else:
+        st.info("Enter cookie and click button")
+        st.stop()
+
+    st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
 
 # -------------------------------
-# DATA
+# TIMEFRAME
 # -------------------------------
-def get_data(sym):
+timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
+
+# -------------------------------
+# DATA FETCH
+# -------------------------------
+@st.cache_data
+def get_data(symbol, timeframe):
     try:
-        df = yf.download(sym, period="3mo", interval="5m", progress=False)
-        return df.dropna()
+        df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+
+        if df is None or df.empty:
+            return None
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df.dropna()
+
+        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
+            return None
+
+        return df
+
     except:
         return None
 
 # -------------------------------
-# ATR
+# ATR FUNCTION (NEW)
 # -------------------------------
-def atr(df):
-    tr = (df["High"] - df["Low"]).rolling(14).mean()
-    return tr.iloc[-1]
+def calculate_atr(df, period=14):
+    df = df.copy()
+
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
+
+    tr = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
+    atr = tr.rolling(period).mean()
+
+    return atr.iloc[-1]
 
 # -------------------------------
-# LOGIC
+# AI LOGIC (ATR UPDATED)
 # -------------------------------
-def analyze(df):
+def analyze_stock(df):
+
     if df is None or len(df) < 50:
-        return None
+        return "NO DATA", None, None, None
 
-    last = df.iloc[-1]
+    latest = df.iloc[-1]
     prev = df.iloc[-2]
 
-    try:
-        high = last["High"]
-        low = last["Low"]
-        close = last["Close"]
-        open_ = last["Open"]
-        prev_close = prev["Close"]
-    except:
-        return None
+    close = float(latest["Close"])
+    open_ = float(latest["Open"])
+    high = float(latest["High"])
+    low = float(latest["Low"])
+    prev_close = float(prev["Close"])
 
-    a = atr(df)
+    high_52 = float(df["High"].rolling(252).max().iloc[-1])
 
-    if close > open_:
-        return "BUY", high, high - a, high + 2*a
-    else:
-        return "SELL", low, low + a, low - 2*a
+    atr = calculate_atr(df)
+
+    signal = "WAIT"
+    entry = sl = target = None
+
+    if close >= 0.98 * high_52 and close > open_:
+        signal = "BUY"
+        entry = high
+        sl = entry - atr
+        target = entry + (2 * atr)
+
+    elif high >= high_52 and close < open_:
+        signal = "SELL"
+        entry = low
+        sl = entry + atr
+        target = entry - (2 * atr)
+
+    elif open_ > prev_close * 1.02:
+        signal = "BUY" if close > open_ else "SELL"
+
+        if signal == "BUY":
+            entry = high
+            sl = entry - atr
+            target = entry + (2 * atr)
+        else:
+            entry = low
+            sl = entry + atr
+            target = entry - (2 * atr)
+
+    return signal, entry, sl, target
 
 # -------------------------------
-# RUN
+# RUN SCANNER
 # -------------------------------
-if st.button("Run Scanner"):
+if st.button("Run AI Scanner"):
 
     results = []
 
     for sym in symbols:
-        df = get_data(sym)
-        out = analyze(df)
-
-        if not out:
-            continue
-
-        signal, entry, sl, target = out
+        df = get_data(sym, timeframe)
+        signal, entry, sl, target = analyze_stock(df)
 
         results.append({
             "Stock": sym,
             "Signal": signal,
-            "Entry": round(entry,2),
-            "SL": round(sl,2),
-            "Target": round(target,2)
+            "Entry": round(entry, 2) if entry else None,
+            "SL": round(sl, 2) if sl else None,
+            "Target": round(target, 2) if target else None
         })
 
-    # -------------------------------
-    # FALLBACK
-    # -------------------------------
-    if len(results) == 0:
-
-        st.warning("No strict trades → fallback mode")
-
-        for sym in symbols:
-            df = get_data(sym)
-            if df is None:
-                continue
-
-            last = df.iloc[-1]
-
-            results.append({
-                "Stock": sym,
-                "Signal": "INFO",
-                "Entry": last["Close"],
-                "SL": "-",
-                "Target": "-"
-            })
-
-    # -------------------------------
-    # OUTPUT
-    # -------------------------------
     df_results = pd.DataFrame(results)
 
-    st.subheader("Results")
-    st.dataframe(df_results)
+    # METRICS
+    buy_count = len(df_results[df_results["Signal"] == "BUY"])
+    sell_count = len(df_results[df_results["Signal"] == "SELL"])
+    total = len(df_results)
 
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Stocks", total)
+    c2.metric("BUY", buy_count)
+    c3.metric("SELL", sell_count)
+
+    # TABLE
+    st.subheader("All Results")
+    st.data_editor(df_results, use_container_width=True)
+
+    # TOP 2
     st.subheader("Top 2 Trades")
+    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
 
-    top2 = df_results.head(2)
+    for _, row in best.iterrows():
+        color = "green" if row["Signal"] == "BUY" else "red"
 
-    for _, r in top2.iterrows():
-        st.write(f"{r['Stock']} → {r['Signal']} | Entry: {r['Entry']}")
+        st.markdown(f"""
+        <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
+        <b>{row['Stock']}</b> - {row['Signal']}<br>
+        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}
+        </div>
+        """, unsafe_allow_html=True)
+
+    if best.empty:
+        st.warning("No high probability trades")
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.caption("Educational use only. Confirm before trading.")
