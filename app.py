@@ -35,8 +35,6 @@ if source == "Manual CSV":
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
-
-        # FIX column names
         df_symbols.columns = df_symbols.columns.str.strip()
 
         if "Symbol" in df_symbols.columns:
@@ -77,7 +75,7 @@ else:
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         if not xsrf:
-            raise Exception("Invalid Cookie / XSRF missing")
+            raise Exception("Invalid Cookie")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
@@ -98,11 +96,7 @@ else:
 
         data = res.json().get("data", [])
 
-        symbols = []
-        for row in data:
-            sym = row.get("nsecode")
-            if sym:
-                symbols.append(sym.upper() + ".NS")
+        symbols = [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
 
         if not symbols:
             raise Exception("No stocks returned")
@@ -121,10 +115,7 @@ else:
     elif "symbols" in st.session_state:
         symbols = st.session_state["symbols"]
     else:
-        st.info("Enter cookie and click button")
         st.stop()
-
-    st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
 
 # -------------------------------
 # TIMEFRAME
@@ -147,16 +138,13 @@ def get_data(symbol, timeframe):
 
         df = df.dropna()
 
-        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
-            return None
-
         return df
 
     except:
         return None
 
 # -------------------------------
-# ATR FUNCTION (NEW)
+# ATR FUNCTION
 # -------------------------------
 def calculate_atr(df, period=14):
     df = df.copy()
@@ -171,7 +159,45 @@ def calculate_atr(df, period=14):
     return atr.iloc[-1]
 
 # -------------------------------
-# AI LOGIC (ATR UPDATED)
+# RISK SETTINGS
+# -------------------------------
+st.sidebar.header("💼 Risk Management")
+
+capital = st.sidebar.number_input("Capital (₹)", value=50000)
+risk_percent = st.sidebar.slider("Risk % per trade", 0.5, 5.0, 1.0)
+
+risk_amount = capital * (risk_percent / 100)
+
+# -------------------------------
+# POSITION SIZE
+# -------------------------------
+def calculate_position(entry, sl, capital, risk_amount):
+
+    if entry is None or sl is None:
+        return 0, 0, 0
+
+    sl_distance = abs(entry - sl)
+
+    if sl_distance == 0:
+        return 0, 0, 0
+
+    qty = int(risk_amount / sl_distance)
+
+    if qty <= 0:
+        return 0, 0, 0
+
+    capital_used = qty * entry
+    actual_risk = qty * sl_distance
+
+    if capital_used > capital:
+        qty = int(capital / entry)
+        capital_used = qty * entry
+        actual_risk = qty * sl_distance
+
+    return qty, capital_used, actual_risk
+
+# -------------------------------
+# AI LOGIC
 # -------------------------------
 def analyze_stock(df):
 
@@ -231,32 +257,26 @@ if st.button("Run AI Scanner"):
         df = get_data(sym, timeframe)
         signal, entry, sl, target = analyze_stock(df)
 
+        qty, cap_used, risk = calculate_position(entry, sl, capital, risk_amount)
+
         results.append({
             "Stock": sym,
             "Signal": signal,
             "Entry": round(entry, 2) if entry else None,
             "SL": round(sl, 2) if sl else None,
-            "Target": round(target, 2) if target else None
+            "Target": round(target, 2) if target else None,
+            "Qty": qty,
+            "Capital Used": round(cap_used, 0),
+            "Risk ₹": round(risk, 0)
         })
 
     df_results = pd.DataFrame(results)
 
-    # METRICS
-    buy_count = len(df_results[df_results["Signal"] == "BUY"])
-    sell_count = len(df_results[df_results["Signal"] == "SELL"])
-    total = len(df_results)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Stocks", total)
-    c2.metric("BUY", buy_count)
-    c3.metric("SELL", sell_count)
-
-    # TABLE
     st.subheader("All Results")
-    st.data_editor(df_results, use_container_width=True)
+    st.dataframe(df_results, use_container_width=True)
 
-    # TOP 2
     st.subheader("Top 2 Trades")
+
     best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
 
     for _, row in best.iterrows():
@@ -265,7 +285,8 @@ if st.button("Run AI Scanner"):
         st.markdown(f"""
         <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
         <b>{row['Stock']}</b> - {row['Signal']}<br>
-        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}
+        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}<br>
+        Qty: {row['Qty']} | Capital: ₹{row['Capital Used']} | Risk: ₹{row['Risk ₹']}
         </div>
         """, unsafe_allow_html=True)
 
