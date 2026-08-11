@@ -26,26 +26,47 @@ source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"])
 df_symbols = pd.DataFrame()
 
 # -------------------------------
-# CSV MODE
+# CSV MODE (FINAL FIX)
 # -------------------------------
 if source == "Manual CSV":
+
     file = st.file_uploader("Upload CSV", type=["csv"])
 
     if file:
         df_symbols = pd.read_csv(file)
+
+        # CLEAN COLUMN NAMES
         df_symbols.columns = df_symbols.columns.str.lower().str.strip()
 
+        # 🔍 AUTO-DETECT SYMBOL COLUMN
+        symbol_col = None
+        for col in df_symbols.columns:
+            if "sym" in col:   # handles symbol / symbols / nsecode
+                symbol_col = col
+                break
+
+        if symbol_col is None:
+            st.error(f"❌ No symbol column found. Columns: {list(df_symbols.columns)}")
+            st.stop()
+
+        # FIX SYMBOL LIST
+        symbols = [
+            str(s).strip().upper() + ".NS"
+            for s in df_symbols[symbol_col].dropna()
+        ]
+
+        # FIX volume
         if "volume" in df_symbols.columns:
             df_symbols["volume"] = (
-                df_symbols["volume"].astype(str)
+                df_symbols["volume"]
+                .astype(str)
                 .str.replace(",", "")
             )
             df_symbols["volume"] = pd.to_numeric(df_symbols["volume"], errors="coerce")
 
+        # FIX close
         if "close" in df_symbols.columns:
             df_symbols["close"] = pd.to_numeric(df_symbols["close"], errors="coerce")
-
-        symbols = [s.upper() + ".NS" for s in df_symbols["symbol"]]
 
     else:
         symbols = ["RELIANCE.NS","HDFCBANK.NS"]
