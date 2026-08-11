@@ -224,8 +224,36 @@ if st.button("Run AI Scanner"):
                 "Volume": int(volume)
             })
 
-    if len(results) == 0:
+   if len(results) == 0:
     st.warning("No strict trades → showing fallback trades")
+
+    fallback_results = []
+
+    for sym in symbols:
+        df = get_data(sym, timeframe)
+        if df is None:
+            continue
+
+        signal, entry, sl, target, atr = analyze_stock(df)
+
+        if signal in ["BUY", "SELL"] and entry and sl and target:
+            rr = abs(target - entry) / abs(entry - sl)
+
+            fallback_results.append({
+                "Stock": sym,
+                "Signal": signal,
+                "Entry": round(entry, 2),
+                "SL": round(sl, 2),
+                "Target": round(target, 2),
+                "RR": round(rr, 2),
+                "Volume": 0
+            })
+
+    if len(fallback_results) == 0:
+        st.error("No trades at all today")
+        st.stop()
+
+    df_results = pd.DataFrame(fallback_results)
 
     # fallback = ignore filters
     fallback_results = []
