@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import requests
 from urllib.parse import unquote
@@ -8,8 +7,8 @@ import time
 # -------------------------------
 # APP CONFIG
 # -------------------------------
-st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
-st.markdown("<h2 style='text-align:center;'>SMT PRO AI Trading Terminal</h2><hr>", unsafe_allow_html=True)
+st.set_page_config(page_title="Risk Calculator", layout="wide")
+st.markdown("<h2 style='text-align:center;'>📊 Risk & Position Size Calculator</h2><hr>", unsafe_allow_html=True)
 
 # -------------------------------
 # RISK SETTINGS
@@ -35,37 +34,35 @@ if auto_refresh:
 source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=True)
 
 # ===============================
-# CSV MODE
+# CSV MODE (REQUIRES Entry & SL)
 # ===============================
 if source == "Manual CSV":
 
-    uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload CSV (Symbol, Entry, SL)", type=["csv"])
 
     if uploaded_file:
-        df_symbols = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file)
 
-        if "Symbol" in df_symbols.columns:
-            symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
-        else:
-            st.error("CSV must contain 'Symbol' column")
+        required = ["Symbol", "Entry", "SL"]
+        if not all(col in df.columns for col in required):
+            st.error("CSV must contain: Symbol, Entry, SL")
             st.stop()
+
     else:
-        symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS"]
+        st.info("Upload CSV with Symbol, Entry, SL")
+        st.stop()
 
 # ===============================
-# CHARTINK LIVE MODE
+# CHARTINK MODE (USER INPUT ENTRY/SL)
 # ===============================
 else:
 
     st.subheader("Chartink LIVE Scanner")
+
     chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
 
     @st.cache_data(ttl=30)
-    def get_chartink_symbols(cookie):
-
-        if not cookie:
-            raise Exception("Cookie required")
-
+    def get_symbols(cookie):
         session = requests.Session()
 
         for part in cookie.split(";"):
@@ -74,167 +71,92 @@ else:
                 session.cookies.set(k, v, domain="chartink.com")
 
         session.get("https://chartink.com")
-
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
             "X-XSRF-TOKEN": xsrf,
-            "Content-Type": "application/json",
-            "Referer": "https://chartink.com/"
+            "Content-Type": "application/json"
         }
 
-        payload = {
-            "scan_clause": "( {cash} ( daily close > daily open ) )"
-        }
+        payload = {"scan_clause": "( {cash} ( daily close > daily open ) )"}
 
         res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
         data = res.json().get("data", [])
 
-        return [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
+        return [row["nsecode"] for row in data if row.get("nsecode")]
 
-    if st.button("Get LIVE Stocks"):
-        symbols = get_chartink_symbols(chartink_cookie)
-        st.session_state["symbols"] = symbols
+    if st.button("Get Stocks"):
+        symbols = get_symbols(chartink_cookie)
 
-    elif "symbols" in st.session_state:
-        symbols = st.session_state["symbols"]
+        df = pd.DataFrame({
+            "Symbol": symbols,
+            "Entry": [0]*len(symbols),
+            "SL": [0]*len(symbols)
+        })
+
+        st.warning("Enter Entry & SL manually below")
+
+        df = st.data_editor(df, use_container_width=True)
+
     else:
         st.stop()
 
 # -------------------------------
-# TIMEFRAME
+# POSITION SIZE FUNCTION
 # -------------------------------
-timeframe = st.selectbox("Timeframe", ["5m", "15m", "1d"])
+def calculate(entry, sl, capital, risk_amount):
 
-# -------------------------------
-# DATA FETCH
-# -------------------------------
-@st.cache_data
-def get_data(symbol, tf):
-    try:
-        df = yf.download(symbol, period="5d", interval=tf, progress=False)
-        df = df.dropna()
-        return df
-    except:
-        return None
-
-# -------------------------------
-# SIGNAL LOGIC
-# -------------------------------
-def analyze_stock(df):
-
-    if df is None or len(df) < 50:
-        return "WAIT", None, None, None
-
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    close = float(latest["Close"])
-    open_ = float(latest["Open"])
-    high = float(latest["High"])
-    low = float(latest["Low"])
-    prev_close = float(prev["Close"])
-
-    high_52 = float(df["High"].rolling(252).max().iloc[-1])
-
-    if close >= 0.98 * high_52 and close > open_:
-        return "BUY", high, low, high + (high - low) * 2
-
-    elif high >= high_52 and close < open_:
-        return "SELL", low, high, low - (high - low) * 2
-
-    elif open_ > prev_close * 1.02:
-        if close > open_:
-            return "BUY", high, low, high + (high - low) * 2
-        else:
-            return "SELL", low, high, low - (high - low) * 2
-
-    return "WAIT", None, None, None
-
-# -------------------------------
-# POSITION SIZE
-# -------------------------------
-def calculate_qty(entry, sl, capital, risk_amount):
-
-    if entry is None or sl is None:
-        return 0, 0, 0, "NO DATA"
-
-    sl_dist = round(abs(entry - sl), 2)
-
-    if sl_dist <= 0:
+    if entry <= 0 or sl <= 0:
         return 0, 0, 0, "INVALID"
+
+    sl_dist = abs(entry - sl)
+
+    if sl_dist == 0:
+        return 0, 0, 0, "SL ZERO"
 
     ideal_qty = int(risk_amount / sl_dist)
     max_qty = int(capital / entry)
 
-    final_qty = min(ideal_qty, max_qty)
+    qty = min(ideal_qty, max_qty)
 
-    position_value = final_qty * entry
-    actual_risk = final_qty * sl_dist
+    capital_used = qty * entry
+    risk_used = qty * sl_dist
 
-    status = "OK" if final_qty == ideal_qty else "CAP LIMITED"
+    status = "OK" if qty == ideal_qty else "CAP LIMITED"
 
-    return final_qty, position_value, actual_risk, status
+    return qty, capital_used, risk_used, status
 
 # -------------------------------
-# RUN SCANNER
+# CALCULATE BUTTON
 # -------------------------------
-if st.button("Run AI Scanner"):
+if st.button("Calculate Position Size"):
 
     results = []
 
-    for sym in symbols:
+    for _, row in df.iterrows():
 
-        df = get_data(sym, timeframe)
-        signal, entry, sl, target = analyze_stock(df)
+        symbol = row["Symbol"]
+        entry = float(row["Entry"])
+        sl = float(row["SL"])
 
-        qty, value, risk_used, status = calculate_qty(entry, sl, capital, risk_amount)
+        qty, cap_used, risk_used, status = calculate(entry, sl, capital, risk_amount)
 
         results.append({
-            "Stock": sym,
-            "Signal": signal,
-            "Entry": round(entry, 2) if entry else None,
-            "SL": round(sl, 2) if sl else None,
-            "Target": round(target, 2) if target else None,
+            "Stock": symbol,
+            "Entry": entry,
+            "SL": sl,
             "Qty": qty,
-            "Capital": round(value, 0),
-            "Risk": round(risk_used, 0),
+            "Capital Used": round(cap_used, 0),
+            "Risk Used": round(risk_used, 0),
             "Status": status
         })
 
-    df_results = pd.DataFrame(results)
+    result_df = pd.DataFrame(results)
 
-    # SHOW ALL SIGNALS
-    st.subheader("📊 All Signals")
-    st.dataframe(df_results, use_container_width=True)
-
-    # FILTER TRADABLE
-    tradable = df_results[
-        (df_results["Signal"].isin(["BUY","SELL"])) &
-        (df_results["Qty"] > 0)
-    ]
-
-    st.subheader("🔥 Top Trades (₹50K Compatible)")
-    best = tradable.head(2)
-
-    for _, row in best.iterrows():
-        color = "green" if row["Signal"] == "BUY" else "red"
-
-        st.markdown(f"""
-        <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
-        <b>{row['Stock']}</b> - {row['Signal']}<br>
-        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}<br>
-        Qty: {row['Qty']} | Capital: ₹{row['Capital']} | Risk: ₹{row['Risk']}<br>
-        Status: {row['Status']}
-        </div>
-        """, unsafe_allow_html=True)
-
-    if best.empty:
-        st.warning("❌ No valid trades today (Capital Protection Mode)")
+    st.subheader("📊 Position Size Output")
+    st.dataframe(result_df, use_container_width=True)
 
 # -------------------------------
 # FOOTER
 # -------------------------------
-st.caption("Educational use only. Follow risk management strictly.")
+st.caption("Only risk calculation. No trading signals included.")
