@@ -24,21 +24,38 @@ if auto_refresh:
 # -------------------------------
 source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=True)
 
+df_symbols = pd.DataFrame()
+
 # ===============================
-# CSV MODE
+# CSV MODE (FIXED)
 # ===============================
 if source == "Manual CSV":
+
     uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
-        if "Symbol" in df_symbols.columns:
-            symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
-        else:
-            st.error("CSV must contain 'Symbol'")
+
+        # CLEAN COLUMNS
+        df_symbols.columns = df_symbols.columns.str.strip().str.lower()
+
+        # FIX volume (remove commas)
+        if "volume" in df_symbols.columns:
+            df_symbols["volume"] = df_symbols["volume"].astype(str).str.replace(",", "")
+            df_symbols["volume"] = pd.to_numeric(df_symbols["volume"], errors="coerce")
+
+        # FIX close
+        if "close" in df_symbols.columns:
+            df_symbols["close"] = pd.to_numeric(df_symbols["close"], errors="coerce")
+
+        if "symbol" not in df_symbols.columns:
+            st.error("CSV must contain 'symbol' column")
             st.stop()
+
+        symbols = [s.strip().upper() + ".NS" for s in df_symbols["symbol"].dropna()]
+
     else:
-        symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS"]
+        symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS"]
 
 # ===============================
 # CHARTINK MODE
@@ -76,9 +93,6 @@ else:
 
         res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
 
-        if res.status_code != 200:
-            raise Exception("Chartink fetch failed")
-
         data = res.json().get("data", [])
         return [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
 
@@ -94,10 +108,7 @@ else:
     elif "symbols" in st.session_state:
         symbols = st.session_state["symbols"]
     else:
-        st.info("Enter cookie and click button")
         st.stop()
-
-    st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
 
 # -------------------------------
 # TIMEFRAME
@@ -111,20 +122,16 @@ timeframe = st.selectbox("Timeframe", ["5m","15m","1d"])
 def get_data(symbol, timeframe):
     try:
         df = yf.download(symbol, period="3mo", interval=timeframe, progress=False)
-
         if df is None or df.empty:
             return None
-
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-
         return df.dropna()
-
     except:
         return None
 
 # -------------------------------
-# ATR FUNCTION
+# ATR
 # -------------------------------
 def calculate_atr(df, period=14):
     df = df.copy()
@@ -135,7 +142,7 @@ def calculate_atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 # -------------------------------
-# ANALYSIS LOGIC
+# ANALYSIS
 # -------------------------------
 def analyze_stock(df):
 
@@ -174,7 +181,7 @@ def analyze_stock(df):
     return "WAIT", None, None, None, None
 
 # -------------------------------
-# RUN SCANNER
+# RUN
 # -------------------------------
 if st.button("Run AI Scanner"):
 
@@ -182,17 +189,26 @@ if st.button("Run AI Scanner"):
 
     for sym in symbols:
         df = get_data(sym, timeframe)
-
         if df is None:
             continue
 
         signal, entry, sl, target, atr = analyze_stock(df)
 
-        volume = df["Volume"].iloc[-1] if "Volume" in df.columns else 0
-        close_price = df["Close"].iloc[-1]
+        # GET CSV DATA IF AVAILABLE
+        if not df_symbols.empty:
+            row = df_symbols[df_symbols["symbol"].str.upper() == sym.replace(".NS","")]
+            if not row.empty:
+                volume = row["volume"].values[0]
+                close_price = row["close"].values[0]
+            else:
+                volume = df["Volume"].iloc[-1]
+                close_price = df["Close"].iloc[-1]
+        else:
+            volume = df["Volume"].iloc[-1]
+            close_price = df["Close"].iloc[-1]
 
-        # Liquidity Filter
-        if volume < 200000 or close_price < 100:
+        # RELAXED FILTER (₹50K FRIENDLY)
+        if volume < 50000 or close_price < 50:
             continue
 
         if signal in ["BUY","SELL"] and entry and sl and target:
@@ -204,18 +220,17 @@ if st.button("Run AI Scanner"):
                 "Entry": round(entry,2),
                 "SL": round(sl,2),
                 "Target": round(target,2),
-                "ATR": round(atr,2),
-                "Volume": int(volume),
-                "RR": round(rr,2)
+                "RR": round(rr,2),
+                "Volume": int(volume)
             })
 
     if len(results) == 0:
-        st.warning("No valid trades")
+        st.warning("No valid trades (filter too strict or no setup today)")
         st.stop()
 
     df_results = pd.DataFrame(results)
 
-    # Ranking
+    # RANKING
     df_results["Score"] = (
         df_results["RR"]*0.6 +
         (df_results["Volume"]/df_results["Volume"].max())*0.4
@@ -226,7 +241,7 @@ if st.button("Run AI Scanner"):
     st.subheader("📊 Filtered Results")
     st.dataframe(df_results, use_container_width=True)
 
-    # SMART 2 TRADE SELECTION
+    # SMART TOP 2
     buy_df = df_results[df_results["Signal"]=="BUY"]
     sell_df = df_results[df_results["Signal"]=="SELL"]
 
@@ -244,11 +259,11 @@ if st.button("Run AI Scanner"):
         <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
         <b>{row['Stock']}</b> - {row['Signal']}<br>
         Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}<br>
-        ATR: {row['ATR']} | RR: {row['RR']}
+        RR: {row['RR']}
         </div>
         """, unsafe_allow_html=True)
 
 # -------------------------------
 # FOOTER
 # -------------------------------
-st.caption("Educational use only. ATR-based system with smart filtering.")
+st.caption("Final stable version • ATR + CSV fix + Smart filtering")
