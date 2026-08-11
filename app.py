@@ -6,69 +6,57 @@ from urllib.parse import unquote
 import time
 
 # -------------------------------
-# APP CONFIG
+# CONFIG
 # -------------------------------
 st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
-st.markdown("<h2 style='text-align:center;'>SMT PRO AI Trading Terminal</h2><hr>", unsafe_allow_html=True)
+st.title("SMT PRO AI Trading Terminal")
 
 # -------------------------------
 # AUTO REFRESH
 # -------------------------------
-auto_refresh = st.checkbox("Auto Refresh (5 min)", value=False)
-if auto_refresh:
+if st.checkbox("Auto Refresh (5 min)"):
     time.sleep(300)
     st.rerun()
 
 # -------------------------------
-# STOCK SOURCE
+# SOURCE
 # -------------------------------
-source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=True)
+source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"])
 
 df_symbols = pd.DataFrame()
 
-# ===============================
-# CSV MODE (FIXED)
-# ===============================
+# -------------------------------
+# CSV MODE
+# -------------------------------
 if source == "Manual CSV":
+    file = st.file_uploader("Upload CSV", type=["csv"])
 
-    uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
+    if file:
+        df_symbols = pd.read_csv(file)
+        df_symbols.columns = df_symbols.columns.str.lower().str.strip()
 
-    if uploaded_file:
-        df_symbols = pd.read_csv(uploaded_file)
-
-        # CLEAN COLUMNS
-        df_symbols.columns = df_symbols.columns.str.strip().str.lower()
-
-        # FIX volume (remove commas)
         if "volume" in df_symbols.columns:
-            df_symbols["volume"] = df_symbols["volume"].astype(str).str.replace(",", "")
+            df_symbols["volume"] = (
+                df_symbols["volume"].astype(str)
+                .str.replace(",", "")
+            )
             df_symbols["volume"] = pd.to_numeric(df_symbols["volume"], errors="coerce")
 
-        # FIX close
         if "close" in df_symbols.columns:
             df_symbols["close"] = pd.to_numeric(df_symbols["close"], errors="coerce")
 
-        if "symbol" not in df_symbols.columns:
-            st.error("CSV must contain 'symbol' column")
-            st.stop()
-
-        symbols = [s.strip().upper() + ".NS" for s in df_symbols["symbol"].dropna()]
+        symbols = [s.upper() + ".NS" for s in df_symbols["symbol"]]
 
     else:
-        symbols = ["RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS"]
+        symbols = ["RELIANCE.NS","HDFCBANK.NS"]
 
-# ===============================
+# -------------------------------
 # CHARTINK MODE
-# ===============================
+# -------------------------------
 else:
-    st.subheader("Chartink LIVE Scanner")
-    chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
+    cookie = st.text_input("Chartink Cookie", type="password")
 
-    @st.cache_data(ttl=60)
-    def get_chartink_symbols(cookie):
-        if not cookie:
-            raise Exception("Cookie required")
-
+    def get_symbols(cookie):
         session = requests.Session()
 
         for part in cookie.split(";"):
@@ -80,52 +68,32 @@ else:
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
             "X-XSRF-TOKEN": xsrf,
-            "Content-Type": "application/json",
-            "Referer": "https://chartink.com/"
+            "Content-Type": "application/json"
         }
 
-        payload = {
-            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} ( daily close >= daily max(252, daily high)*0.98 and daily volume > daily sma(daily volume,20)*1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max(252, daily high) and daily close < daily open and daily volume > daily sma(daily volume,20)*1.5 ) ) or ( {cash} ( daily open > 1 day ago close*1.02 and daily volume > daily sma(daily volume,20)*2 and daily close > daily open ) ) ) ) ) )"
-        }
+        payload = {"scan_clause": "your logic"}
 
-        res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
+        r = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
+        data = r.json().get("data", [])
 
-        data = res.json().get("data", [])
-        return [row["nsecode"].upper() + ".NS" for row in data if row.get("nsecode")]
+        return [d["nsecode"] + ".NS" for d in data]
 
-    if st.button("Get LIVE Stocks"):
+    if st.button("Get Stocks"):
         try:
-            symbols = get_chartink_symbols(chartink_cookie)
+            symbols = get_symbols(cookie)
             st.session_state["symbols"] = symbols
-            st.success(f"{len(symbols)} stocks loaded")
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
+        except:
+            st.error("Chartink error")
 
-    elif "symbols" in st.session_state:
-        symbols = st.session_state["symbols"]
-    else:
-        st.stop()
+    symbols = st.session_state.get("symbols", [])
 
 # -------------------------------
-# TIMEFRAME
+# DATA
 # -------------------------------
-timeframe = st.selectbox("Timeframe", ["5m","15m","1d"])
-
-# -------------------------------
-# DATA FETCH
-# -------------------------------
-@st.cache_data
-def get_data(symbol, timeframe):
+def get_data(sym):
     try:
-        df = yf.download(symbol, period="3mo", interval=timeframe, progress=False)
-        if df is None or df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        df = yf.download(sym, period="3mo", interval="5m", progress=False)
         return df.dropna()
     except:
         return None
@@ -133,193 +101,93 @@ def get_data(symbol, timeframe):
 # -------------------------------
 # ATR
 # -------------------------------
-def calculate_atr(df, period=14):
-    df = df.copy()
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
-    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
-    tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
-    return tr.rolling(period).mean().iloc[-1]
+def atr(df):
+    tr = (df["High"] - df["Low"]).rolling(14).mean()
+    return tr.iloc[-1]
 
 # -------------------------------
-# ANALYSIS
+# LOGIC
 # -------------------------------
-def analyze_stock(df):
-
+def analyze(df):
     if df is None or len(df) < 50:
-        return "WAIT", None, None, None, None
+        return None
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
     try:
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        close = float(latest["Close"])
-        open_ = float(latest["Open"])
-        high = float(latest["High"])
-        low = float(latest["Low"])
-        prev_close = float(prev["Close"])
-
-        atr = calculate_atr(df)
-
+        high = last["High"]
+        low = last["Low"]
+        close = last["Close"]
+        open_ = last["Open"]
+        prev_close = prev["Close"]
     except:
-        return "WAIT", None, None, None, None
+        return None
 
-    high_52 = float(df["High"].rolling(252).max().iloc[-1])
+    a = atr(df)
 
-    if close >= 0.95 * high_52 and close > open_:
-        return "BUY", high, high - atr, high + 2*atr, atr
-
-    elif high >= high_52 and close < open_:
-        return "SELL", low, low + atr, low - 2*atr, atr
-
-    elif open_ > prev_close * 1.02:
-        if close > open_:
-            return "BUY", high, high - atr, high + 2*atr, atr
-        else:
-            return "SELL", low, low + atr, low - 2*atr, atr
-
-    return "WAIT", None, None, None, None
+    if close > open_:
+        return "BUY", high, high - a, high + 2*a
+    else:
+        return "SELL", low, low + a, low - 2*a
 
 # -------------------------------
 # RUN
 # -------------------------------
-if st.button("Run AI Scanner"):
+if st.button("Run Scanner"):
 
     results = []
 
     for sym in symbols:
-        df = get_data(sym, timeframe)
-        if df is None:
+        df = get_data(sym)
+        out = analyze(df)
+
+        if not out:
             continue
 
-        signal, entry, sl, target, atr = analyze_stock(df)
+        signal, entry, sl, target = out
 
-        # GET CSV DATA IF AVAILABLE
-        if not df_symbols.empty:
-            row = df_symbols[df_symbols["symbol"].str.upper() == sym.replace(".NS","")]
-            if not row.empty:
-                volume = row["volume"].values[0]
-                close_price = row["close"].values[0]
-            else:
-                volume = df["Volume"].iloc[-1]
-                close_price = df["Close"].iloc[-1]
-        else:
-            volume = df["Volume"].iloc[-1]
-            close_price = df["Close"].iloc[-1]
+        results.append({
+            "Stock": sym,
+            "Signal": signal,
+            "Entry": round(entry,2),
+            "SL": round(sl,2),
+            "Target": round(target,2)
+        })
 
-        # RELAXED FILTER (₹50K FRIENDLY)
-        if volume < 50000 or close_price < 50:
-            continue
+    # -------------------------------
+    # FALLBACK
+    # -------------------------------
+    if len(results) == 0:
 
-        if signal in ["BUY","SELL"] and entry and sl and target:
-            rr = abs(target-entry)/abs(entry-sl)
+        st.warning("No strict trades → fallback mode")
+
+        for sym in symbols:
+            df = get_data(sym)
+            if df is None:
+                continue
+
+            last = df.iloc[-1]
 
             results.append({
                 "Stock": sym,
-                "Signal": signal,
-                "Entry": round(entry,2),
-                "SL": round(sl,2),
-                "Target": round(target,2),
-                "RR": round(rr,2),
-                "Volume": int(volume)
+                "Signal": "INFO",
+                "Entry": last["Close"],
+                "SL": "-",
+                "Target": "-"
             })
 
-   if len(results) == 0:
-    st.warning("No strict trades → showing fallback trades")
-
-    fallback_results = []
-
-    for sym in symbols:
-        df = get_data(sym, timeframe)
-        if df is None:
-            continue
-
-        signal, entry, sl, target, atr = analyze_stock(df)
-
-        if signal in ["BUY", "SELL"] and entry and sl and target:
-            rr = abs(target - entry) / abs(entry - sl)
-
-            fallback_results.append({
-                "Stock": sym,
-                "Signal": signal,
-                "Entry": round(entry, 2),
-                "SL": round(sl, 2),
-                "Target": round(target, 2),
-                "RR": round(rr, 2),
-                "Volume": 0
-            })
-
-    if len(fallback_results) == 0:
-        st.error("No trades at all today")
-        st.stop()
-
-    df_results = pd.DataFrame(fallback_results)
-
-    # fallback = ignore filters
-    fallback_results = []
-
-    for sym in symbols:
-        df = get_data(sym, timeframe)
-        if df is None:
-            continue
-
-        signal, entry, sl, target, atr = analyze_stock(df)
-
-        if signal in ["BUY","SELL"] and entry and sl and target:
-            rr = abs(target-entry)/abs(entry-sl)
-
-            fallback_results.append({
-                "Stock": sym,
-                "Signal": signal,
-                "Entry": round(entry,2),
-                "SL": round(sl,2),
-                "Target": round(target,2),
-                "RR": round(rr,2),
-                "Volume": 0
-            })
-
-    if len(fallback_results) == 0:
-        st.error("No trades at all today")
-        st.stop()
-
-    df_results = pd.DataFrame(fallback_results)
-
+    # -------------------------------
+    # OUTPUT
+    # -------------------------------
     df_results = pd.DataFrame(results)
 
-    # RANKING
-    df_results["Score"] = (
-        df_results["RR"]*0.6 +
-        (df_results["Volume"]/df_results["Volume"].max())*0.4
-    )
+    st.subheader("Results")
+    st.dataframe(df_results)
 
-    df_results = df_results.sort_values(by="Score", ascending=False)
+    st.subheader("Top 2 Trades")
 
-    st.subheader("📊 Filtered Results")
-    st.dataframe(df_results, use_container_width=True)
+    top2 = df_results.head(2)
 
-    # SMART TOP 2
-    buy_df = df_results[df_results["Signal"]=="BUY"]
-    sell_df = df_results[df_results["Signal"]=="SELL"]
-
-    if len(buy_df)>0 and len(sell_df)>0:
-        best = pd.concat([buy_df.head(1), sell_df.head(1)])
-    else:
-        best = df_results.head(2)
-
-    st.subheader("🔥 Top 2 Trades")
-
-    for _, row in best.iterrows():
-        color = "green" if row["Signal"]=="BUY" else "red"
-
-        st.markdown(f"""
-        <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
-        <b>{row['Stock']}</b> - {row['Signal']}<br>
-        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}<br>
-        RR: {row['RR']}
-        </div>
-        """, unsafe_allow_html=True)
-
-# -------------------------------
-# FOOTER
-# -------------------------------
-st.caption("Final stable version • ATR + CSV fix + Smart filtering")
+    for _, r in top2.iterrows():
+        st.write(f"{r['Stock']} → {r['Signal']} | Entry: {r['Entry']}")
